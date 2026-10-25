@@ -23,7 +23,7 @@ jobs:
         with:
           gradle-version: '8.4'
 
-      - name: Update App Files for Android 14 Fix
+      - name: Update App Files for Non-Stop Background AI
         run: |
           cat << 'EOF' > app/build.gradle
           plugins {
@@ -39,8 +39,8 @@ jobs:
                   applicationId "com.nova.assistant"
                   minSdk 24
                   targetSdk 28
-                  versionCode 2
-                  versionName "2.0"
+                  versionCode 3
+                  versionName "3.0"
               }
 
               compileOptions {
@@ -64,6 +64,8 @@ jobs:
               <uses-permission android:name="android.permission.RECORD_AUDIO" />
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
               <uses-permission android:name="android.permission.CALL_PHONE" />
               <uses-permission android:name="android.permission.CAMERA" />
               <uses-permission android:name="android.permission.FLASHLIGHT" />
@@ -96,7 +98,8 @@ jobs:
                   <service
                       android:name=".NovaVoiceService"
                       android:enabled="true"
-                      android:exported="false" />
+                      android:exported="false"
+                      android:stopWithTask="false" />
 
                   <service
                       android:name=".NovaAccessibilityService"
@@ -120,8 +123,7 @@ jobs:
           import android.Manifest
           import android.accessibilityservice.AccessibilityService
           import android.app.*
-          import android.content.Context
-          import android.content.Intent
+          import android.content.*
           import android.content.pm.PackageManager
           import android.graphics.Color
           import android.graphics.Typeface
@@ -202,7 +204,7 @@ jobs:
                   }
 
                   val accessBtn = Button(this).apply {
-                      text = "ENABLE ACCESSIBILITY"
+                      text = "ENABLE ACCESSIBILITY (बैकग्राउंड लॉक)"
                       textSize = 14f
                       setTextColor(Color.WHITE)
                       background = GradientDrawable().apply {
@@ -250,10 +252,20 @@ jobs:
                           needed.add(Manifest.permission.CALL_PHONE)
                       }
                       if (needed.isNotEmpty()) {
-                          Toast.makeText(this, "कृपया Allow पर टैप करें", Toast.LENGTH_SHORT).show()
+                          Toast.makeText(this, "कृपया सभी परमिशन Allow करें", Toast.LENGTH_SHORT).show()
                           requestPermissions(needed.toTypedArray(), 101)
                           return
                       }
+
+                      try {
+                          val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                          if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                              val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                  data = Uri.parse("package:$packageName")
+                              }
+                              startActivity(intent)
+                          }
+                      } catch (e: Exception) {}
                   }
                   launchVoiceService()
               }
@@ -267,12 +279,12 @@ jobs:
 
               private fun launchVoiceService() {
                   try {
-                      startBtn.text = "NOVA AI ACTIVE (बोलिए...)"
+                      startBtn.text = "NOVA AI 24x7 ACTIVE (बोलिए...)"
                       startBtn.background = GradientDrawable().apply {
                           setColor(Color.parseColor("#16A34A"))
                           cornerRadius = 30f
                       }
-                      statusText.text = "🟢 NOVA AI चालू हो गया है!\nअब बोलिए: 'टॉर्च चालू', 'टाइम बताओ', 'यूट्यूब खोलो'..."
+                      statusText.text = "🟢 NOVA AI हमेशा के लिए चालू है!\nअब आप ऐप हटा दें या स्क्रीन बंद कर दें, यह काम करेगा।"
 
                       val serviceIntent = Intent(this, NovaVoiceService::class.java)
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -290,19 +302,40 @@ jobs:
               private var speechRecognizer: SpeechRecognizer? = null
               private var recognizerIntent: Intent? = null
               private var tts: TextToSpeech? = null
+              private var wakeLock: PowerManager.WakeLock? = null
               private val mainHandler = Handler(Looper.getMainLooper())
               private var isListening = false
 
               override fun onCreate() {
                   super.onCreate()
+                  acquireWakeLock()
                   startSafeForeground()
                   tts = TextToSpeech(this, this)
                   setupSpeechRecognizer()
               }
 
+              private fun acquireWakeLock() {
+                  try {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NovaAI::BackgroundVoiceLock")
+                      wakeLock?.acquire()
+                  } catch (e: Exception) {}
+              }
+
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startSafeForeground()
                   startListeningNow()
                   return START_STICKY
+              }
+
+              override fun onTaskRemoved(rootIntent: Intent?) {
+                  val restartIntent = Intent(applicationContext, NovaVoiceService::class.java)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      applicationContext.startForegroundService(restartIntent)
+                  } else {
+                      applicationContext.startService(restartIntent)
+                  }
+                  super.onTaskRemoved(rootIntent)
               }
 
               private fun startSafeForeground() {
@@ -311,15 +344,16 @@ jobs:
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                           val channel = NotificationChannel(
                               channelId,
-                              "NOVA AI Background Service",
+                              "NOVA AI 24x7 Service",
                               NotificationManager.IMPORTANCE_LOW
                           )
                           val manager = getSystemService(NotificationManager::class.java)
                           manager.createNotificationChannel(channel)
                           val notification = Notification.Builder(this, channelId)
-                              .setContentTitle("NOVA AI चालू है")
-                              .setContentText("आपकी आवाज़ सुन रहा है...")
+                              .setContentTitle("NOVA AI बैकग्राउंड में चालू है")
+                              .setContentText("स्क्रीन बंद होने पर भी आपकी आवाज़ सुन रहा है...")
                               .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                              .setOngoing(true)
                               .build()
                           startForeground(1, notification)
                       }
@@ -369,9 +403,7 @@ jobs:
                               override fun onEvent(eventType: Int, params: Bundle?) {}
                           })
                           startListeningNow()
-                      } catch (e: Exception) {
-                          MainActivity.onStatusUpdate?.invoke("माइक शुरू करने में समस्या: ${e.message}", "")
-                      }
+                      } catch (e: Exception) {}
                   }
               }
 
@@ -477,13 +509,16 @@ jobs:
               override fun onInit(status: Int) {
                   if (status == TextToSpeech.SUCCESS) {
                       tts?.language = Locale("hi", "IN")
-                      speak("नोवा एआई चालू हो गया है, अब आप बोल सकते हैं")
+                      speak("नोवा एआई चालू हो गया है")
                   }
               }
 
               override fun onBind(intent: Intent?): IBinder? = null
 
               override fun onDestroy() {
+                  try {
+                      if (wakeLock?.isHeld == true) wakeLock?.release()
+                  } catch (e: Exception) {}
                   speechRecognizer?.destroy()
                   tts?.shutdown()
                   super.onDestroy()
@@ -491,6 +526,17 @@ jobs:
           }
 
           class NovaAccessibilityService : AccessibilityService() {
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  try {
+                      val serviceIntent = Intent(this, NovaVoiceService::class.java)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          startForegroundService(serviceIntent)
+                      } else {
+                          startService(serviceIntent)
+                      }
+                  } catch (e: Exception) {}
+              }
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
               override fun onInterrupt() {}
           }
