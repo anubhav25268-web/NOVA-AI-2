@@ -23,6 +23,479 @@ jobs:
         with:
           gradle-version: '8.4'
 
+      - name: Update App Files for Android 14 Fix
+        run: |
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.nova.assistant'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.nova.assistant"
+                  minSdk 24
+                  targetSdk 28
+                  versionCode 2
+                  versionName "2.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+
+          dependencies {
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.CALL_PHONE" />
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.FLASHLIGHT" />
+              <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="NOVA AI"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".NovaVoiceService"
+                      android:enabled="true"
+                      android:exported="false" />
+
+                  <service
+                      android:name=".NovaAccessibilityService"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/nova/assistant/MainActivity.kt
+          package com.nova.assistant
+
+          import android.Manifest
+          import android.accessibilityservice.AccessibilityService
+          import android.app.*
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.camera2.CameraManager
+          import android.net.Uri
+          import android.os.*
+          import android.provider.AlarmClock
+          import android.provider.MediaStore
+          import android.provider.Settings
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.view.Gravity
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.util.*
+
+          class MainActivity : Activity() {
+              private lateinit var statusText: TextView
+              private lateinit var heardText: TextView
+              private lateinit var startBtn: Button
+
+              companion object {
+                  var onStatusUpdate: ((String, String) -> Unit)? = null
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setBackgroundColor(Color.parseColor("#0F172A"))
+                      setPadding(60, 60, 60, 60)
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "NOVA AI"
+                      textSize = 34f
+                      setTextColor(Color.parseColor("#38BDF8"))
+                      typeface = Typeface.DEFAULT_BOLD
+                      gravity = Gravity.CENTER
+                  }
+
+                  statusText = TextView(this).apply {
+                      text = "आपका पर्सनल वॉइस असिस्टेंट\n(नीचे नीला बटन दबाकर NOVA को चालू करें)"
+                      textSize = 16f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      setPadding(0, 30, 0, 30)
+                  }
+
+                  heardText = TextView(this).apply {
+                      text = "कमांड्स: 'टॉर्च चालू', 'टॉर्च बंद', 'टाइम बताओ', 'यूट्यूब खोलो', 'अलार्म लगाओ', 'कैमरा खोलो'"
+                      textSize = 15f
+                      setTextColor(Color.parseColor("#38BDF8"))
+                      gravity = Gravity.CENTER
+                      setPadding(20, 20, 20, 50)
+                  }
+
+                  startBtn = Button(this).apply {
+                      text = "START NOVA BACKGROUND AI"
+                      textSize = 16f
+                      setTextColor(Color.WHITE)
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#0284C7"))
+                          cornerRadius = 30f
+                      }
+                      setPadding(40, 30, 40, 30)
+                      setOnClickListener {
+                          checkPermissionsAndStart()
+                      }
+                  }
+
+                  val accessBtn = Button(this).apply {
+                      text = "ENABLE ACCESSIBILITY"
+                      textSize = 14f
+                      setTextColor(Color.WHITE)
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#334155"))
+                          cornerRadius = 30f
+                      }
+                      val params = LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.WRAP_CONTENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      ).apply { topMargin = 40 }
+                      layoutParams = params
+                      setPadding(40, 25, 40, 25)
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
+                  }
+
+                  layout.addView(title)
+                  layout.addView(statusText)
+                  layout.addView(heardText)
+                  layout.addView(startBtn)
+                  layout.addView(accessBtn)
+                  setContentView(layout)
+
+                  onStatusUpdate = { status, heard ->
+                      runOnUiThread {
+                          statusText.text = status
+                          if (heard.isNotEmpty()) {
+                              heardText.text = heard
+                          }
+                      }
+                  }
+              }
+
+              private fun checkPermissionsAndStart() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      val needed = mutableListOf<String>()
+                      if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                          needed.add(Manifest.permission.RECORD_AUDIO)
+                      }
+                      if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                          needed.add(Manifest.permission.CAMERA)
+                      }
+                      if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+                          needed.add(Manifest.permission.CALL_PHONE)
+                      }
+                      if (needed.isNotEmpty()) {
+                          Toast.makeText(this, "कृपया Allow पर टैप करें", Toast.LENGTH_SHORT).show()
+                          requestPermissions(needed.toTypedArray(), 101)
+                          return
+                      }
+                  }
+                  launchVoiceService()
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 101) {
+                      launchVoiceService()
+                  }
+              }
+
+              private fun launchVoiceService() {
+                  try {
+                      startBtn.text = "NOVA AI ACTIVE (बोलिए...)"
+                      startBtn.background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#16A34A"))
+                          cornerRadius = 30f
+                      }
+                      statusText.text = "🟢 NOVA AI चालू हो गया है!\nअब बोलिए: 'टॉर्च चालू', 'टाइम बताओ', 'यूट्यूब खोलो'..."
+
+                      val serviceIntent = Intent(this, NovaVoiceService::class.java)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          startForegroundService(serviceIntent)
+                      } else {
+                          startService(serviceIntent)
+                      }
+                  } catch (e: Exception) {
+                      statusText.text = "त्रुटि: ${e.message}"
+                  }
+              }
+          }
+
+          class NovaVoiceService : Service(), TextToSpeech.OnInitListener {
+              private var speechRecognizer: SpeechRecognizer? = null
+              private var recognizerIntent: Intent? = null
+              private var tts: TextToSpeech? = null
+              private val mainHandler = Handler(Looper.getMainLooper())
+              private var isListening = false
+
+              override fun onCreate() {
+                  super.onCreate()
+                  startSafeForeground()
+                  tts = TextToSpeech(this, this)
+                  setupSpeechRecognizer()
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startListeningNow()
+                  return START_STICKY
+              }
+
+              private fun startSafeForeground() {
+                  try {
+                      val channelId = "nova_service_channel"
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          val channel = NotificationChannel(
+                              channelId,
+                              "NOVA AI Background Service",
+                              NotificationManager.IMPORTANCE_LOW
+                          )
+                          val manager = getSystemService(NotificationManager::class.java)
+                          manager.createNotificationChannel(channel)
+                          val notification = Notification.Builder(this, channelId)
+                              .setContentTitle("NOVA AI चालू है")
+                              .setContentText("आपकी आवाज़ सुन रहा है...")
+                              .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                              .build()
+                          startForeground(1, notification)
+                      }
+                  } catch (e: Exception) {}
+              }
+
+              private fun setupSpeechRecognizer() {
+                  mainHandler.post {
+                      try {
+                          speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+                          recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                              putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                              putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+                              putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                          }
+
+                          speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+                              override fun onReadyForSpeech(params: Bundle?) {
+                                  MainActivity.onStatusUpdate?.invoke("🟢 NOVA सुन रहा है... अब बोलिए!", "")
+                              }
+                              override fun onBeginningOfSpeech() {}
+                              override fun onRmsChanged(rmsdB: Float) {}
+                              override fun onBufferReceived(buffer: ByteArray?) {}
+                              override fun onEndOfSpeech() {
+                                  isListening = false
+                              }
+                              override fun onError(error: Int) {
+                                  isListening = false
+                                  restartListening()
+                              }
+                              override fun onResults(results: Bundle?) {
+                                  isListening = false
+                                  val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                  if (!matches.isNullOrEmpty()) {
+                                      val spoken = matches[0]
+                                      MainActivity.onStatusUpdate?.invoke("🟢 NOVA सुन रहा है...", "आपने कहा: \"$spoken\"")
+                                      handleCommand(spoken.lowercase(Locale.getDefault()))
+                                  }
+                                  restartListening()
+                              }
+                              override fun onPartialResults(partialResults: Bundle?) {
+                                  val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                  if (!matches.isNullOrEmpty()) {
+                                      MainActivity.onStatusUpdate?.invoke("🟢 सुन रहा हूँ...", "बोल रहे हैं: \"${matches[0]}\"")
+                                  }
+                              }
+                              override fun onEvent(eventType: Int, params: Bundle?) {}
+                          })
+                          startListeningNow()
+                      } catch (e: Exception) {
+                          MainActivity.onStatusUpdate?.invoke("माइक शुरू करने में समस्या: ${e.message}", "")
+                      }
+                  }
+              }
+
+              private fun startListeningNow() {
+                  mainHandler.post {
+                      if (!isListening && speechRecognizer != null && recognizerIntent != null) {
+                          try {
+                              isListening = true
+                              speechRecognizer?.startListening(recognizerIntent)
+                          } catch (e: Exception) {
+                              isListening = false
+                          }
+                      }
+                  }
+              }
+
+              private fun restartListening() {
+                  mainHandler.postDelayed({
+                      startListeningNow()
+                  }, 800)
+              }
+
+              private fun handleCommand(cmd: String) {
+                  when {
+                      cmd.contains("torch on") || cmd.contains("लाइट चालू") || cmd.contains("टॉर्च चालू") || cmd.contains("टॉर्च ऑन") || cmd.contains("flashlight on") -> {
+                          toggleTorch(true)
+                          speak("टॉर्च चालू कर दी गई है")
+                      }
+                      cmd.contains("torch off") || cmd.contains("लाइट बंद") || cmd.contains("टॉर्च बंद") || cmd.contains("टॉर्च ऑफ") || cmd.contains("flashlight off") -> {
+                          toggleTorch(false)
+                          speak("टॉर्च बंद कर दी गई है")
+                      }
+                      cmd.contains("time") || cmd.contains("समय") || cmd.contains("टाइम") || cmd.contains("बजे") -> {
+                          val cal = Calendar.getInstance()
+                          val h = cal.get(Calendar.HOUR)
+                          val hour = if (h == 0) 12 else h
+                          val m = cal.get(Calendar.MINUTE)
+                          speak("अभी समय $hour बजकर $m मिनट हुआ है")
+                      }
+                      cmd.contains("youtube") || cmd.contains("यूट्यूब") -> {
+                          speak("यूट्यूब खोला जा रहा है")
+                          openUrl("https://www.youtube.com")
+                      }
+                      cmd.contains("google") || cmd.contains("गूगल") -> {
+                          speak("गूगल खोला जा रहा है")
+                          openUrl("https://www.google.com")
+                      }
+                      cmd.contains("camera") || cmd.contains("कैमरा") -> {
+                          speak("कैमरा खोला जा रहा है")
+                          try {
+                              val i = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
+                                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              }
+                              startActivity(i)
+                          } catch (e: Exception) {}
+                      }
+                      cmd.contains("alarm") || cmd.contains("अलार्म") -> {
+                          speak("सुबह 7 बजे का अलार्म सेट किया जा रहा है")
+                          try {
+                              val i = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                                  putExtra(AlarmClock.EXTRA_HOUR, 7)
+                                  putExtra(AlarmClock.EXTRA_MINUTES, 0)
+                                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              }
+                              startActivity(i)
+                          } catch (e: Exception) {}
+                      }
+                      cmd.contains("nova") || cmd.contains("नोवा") || cmd.contains("hello") || cmd.contains("हेलो") -> {
+                          speak("जी बॉस, बताइये मैं क्या मदद करूँ?")
+                      }
+                  }
+              }
+
+              private fun openUrl(url: String) {
+                  try {
+                      val i = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      }
+                      startActivity(i)
+                  } catch (e: Exception) {}
+              }
+
+              private fun toggleTorch(state: Boolean) {
+                  try {
+                      val camManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                      for (id in camManager.cameraIdList) {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                              try {
+                                  camManager.setTorchMode(id, state)
+                              } catch (e: Exception) {}
+                          }
+                      }
+                  } catch (e: Exception) {}
+              }
+
+              private fun speak(text: String) {
+                  tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "NOVA_ID")
+                  mainHandler.postDelayed({
+                      restartListening()
+                  }, 2500)
+              }
+
+              override fun onInit(status: Int) {
+                  if (status == TextToSpeech.SUCCESS) {
+                      tts?.language = Locale("hi", "IN")
+                      speak("नोवा एआई चालू हो गया है, अब आप बोल सकते हैं")
+                  }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onDestroy() {
+                  speechRecognizer?.destroy()
+                  tts?.shutdown()
+                  super.onDestroy()
+              }
+          }
+
+          class NovaAccessibilityService : AccessibilityService() {
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+          }
+          EOF
+
       - name: Build Debug APK
         run: gradle assembleDebug
 
